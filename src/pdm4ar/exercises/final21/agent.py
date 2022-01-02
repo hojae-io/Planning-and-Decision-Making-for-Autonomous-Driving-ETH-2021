@@ -62,8 +62,35 @@ class Pdm4arAgent(Agent):
         self.mpc_controller = None
         self.mpc_estimator = None
         self.mpc_simulator = None
-    
 
+    # Default Methods
+    def get_optimal_path(self):
+        _, _, start = get_dgscenario()
+        rrt_start = RrtStar(start=start, goal=self.goal, static_obstacles=deepcopy([s_obstacle.shape.buffer(2) for s_obstacle in self.static_obstacles]))
+        optimal_path, path_list = rrt_start.planning()
+        return optimal_path, path_list, start
+        
+    def on_episode_init(self, my_name: PlayerName):
+        self.name = my_name
+    
+    def get_commands(self, sim_obs: SimObservations) -> SpacecraftCommands:
+        """ This method is called by the simulator at each time step.
+
+        This is how you can get your current state from the observations:
+        my_current_state: SpacecraftState = sim_obs.players[self.name].state
+        
+        :param sim_obs:
+        :return:
+        """
+        my_current_state: SpacecraftState = sim_obs.players[self.name].state
+
+        current_time = float(sim_obs.time)
+
+        acc_left, acc_right = self.pid_controller(my_current_state, current_time)
+
+        return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
+    
+    # MPC Controller
     def mpc_model_init(self):
         """
         MPC model instantiation
@@ -72,8 +99,8 @@ class Pdm4arAgent(Agent):
         x = self.mpc_model.set_variable('_x', 'x')
         y = self.mpc_model.set_variable('_x', 'y')
         psi = self.mpc_model.set_variable('_x', 'psi')
-        dx = self.mpc_model.set_variable('_x', 'dx') # vx
-        dy = self.mpc_model.set_variable('_x', 'dy') # vy
+        vx = self.mpc_model.set_variable('_x', 'dx') # vx
+        vy = self.mpc_model.set_variable('_x', 'dy') # vy
         dpsi = self.mpc_model.set_variable('_x', 'dpsi')
         # Input struct
         a_r = self.mpc_model.set_variable('_u', 'a_r') # right acceleration
@@ -83,11 +110,11 @@ class Pdm4arAgent(Agent):
         L = self.sg.w_half
         I = self.sg.Iz
         # ODEs
-        self.mpc_model.set_rhs('x', np.cos(psi)*dx-np.sin(psi)*dy)
-        self.mpc_model.set_rhs('y', np.sin(psi)*dx+np.cos(psi)*dy)
+        self.mpc_model.set_rhs('x', np.cos(psi)*vx-np.sin(psi)*vy)
+        self.mpc_model.set_rhs('y', np.sin(psi)*vx+np.cos(psi)*vy)
         self.mpc_model.set_rhs('psi', dpsi)
-        self.mpc_model.set_rhs('vx', dpsi*dy+a_r+a_l)
-        self.mpc_model.set_rhs('vy', -dx*dpsi)
+        self.mpc_model.set_rhs('vx', dpsi*vy+a_r+a_l)
+        self.mpc_model.set_rhs('vy', -vx*dpsi)
         self.mpc_model.set_rhs('dpsi', L*m/I*(a_r-a_l))
         # Build model
         self.mpc_model.setup()
@@ -148,44 +175,6 @@ class Pdm4arAgent(Agent):
         self.mpc_simulator.set_param(**params_simulator)
         self.mpc_simulator.setup()
 
-    def test_point_and_path(self):
-        point1 = Point(80,30).buffer(1)
-        point2 = Point(30,60).buffer(1)
-        point3 = Point(60,60).buffer(1)
-        point4 = Point(60,30).buffer(1)
-        point5 = Point(40, 20).buffer(1)
-        path = LineString([[7, 4], [30, 30], [30, 60], [60, 60], [60, 30]])
-        path2 = LineString([[20, 20], [20+20, 20+20*math.sqrt(3)]])
-        path3 = LineString([[20, 20], [20+20, 20]])
-
-        return [point1, point2, point3, point4, point5, path, path2, path3]
-
-    def get_optimal_path(self):
-        _, _, start = get_dgscenario()
-        rrt_start = RrtStar(start=start, goal=self.goal, static_obstacles=deepcopy([s_obstacle.shape.buffer(2) for s_obstacle in self.static_obstacles]))
-        optimal_path, path_list = rrt_start.planning()
-        return optimal_path, path_list, start
-        
-    def on_episode_init(self, my_name: PlayerName):
-        self.name = my_name
-
-    def get_commands(self, sim_obs: SimObservations) -> SpacecraftCommands:
-        """ This method is called by the simulator at each time step.
-
-        This is how you can get your current state from the observations:
-        my_current_state: SpacecraftState = sim_obs.players[self.name].state
-        
-        :param sim_obs:
-        :return:
-        """
-        my_current_state: SpacecraftState = sim_obs.players[self.name].state
-
-        current_time = float(sim_obs.time)
-
-        acc_left, acc_right = self.pid_controller(my_current_state, current_time)
-
-        return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
-
     def update_target_point(self, my_current_state):
         x = my_current_state.x
         y = my_current_state.y
@@ -213,4 +202,16 @@ class Pdm4arAgent(Agent):
         self.x_ref = target_node.x
         self.y_ref = target_node.y
         self.psi_ref = np.arctan2(dy, dx)
+    
+    # Testing Method
+    def test_point_and_path(self):
+        point1 = Point(80,30).buffer(1)
+        point2 = Point(30,60).buffer(1)
+        point3 = Point(60,60).buffer(1)
+        point4 = Point(60,30).buffer(1)
+        point5 = Point(40, 20).buffer(1)
+        path = LineString([[7, 4], [30, 30], [30, 60], [60, 60], [60, 30]])
+        path2 = LineString([[20, 20], [20+20, 20+20*math.sqrt(3)]])
+        path3 = LineString([[20, 20], [20+20, 20]])
 
+        return [point1, point2, point3, point4, point5, path, path2, path3]
