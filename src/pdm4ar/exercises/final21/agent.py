@@ -45,21 +45,7 @@ class Pdm4arAgent(Agent):
         self.optimal_path = optimal_path
         self.radius = 1
         self.path_nodes = [Node(point, True) if math.hypot(start.x-point[0], start.y-point[1]) < self.radius else Node(point) for point in path_list]
-        
-        self.test = self.test_point_and_path()
 
-
-    def test_point_and_path(self):
-        point1 = Point(80,30).buffer(1)
-        point2 = Point(30,60).buffer(1)
-        point3 = Point(60,60).buffer(1)
-        point4 = Point(60,30).buffer(1)
-        point5 = Point(40, 20).buffer(1)
-        path = LineString([[7, 4], [30, 30], [30, 60], [60, 60], [60, 30]])
-        path2 = LineString([[20, 20], [20+20, 20+20*math.sqrt(3)]])
-        path3 = LineString([[20, 20], [20+20, 20]])
-
-        return [point1, point2, point3, point4, point5, path, path2, path3]
 
     def get_optimal_path(self):
         _, _, start = get_dgscenario()
@@ -195,7 +181,6 @@ class Pdm4arAgent(Agent):
         return acc_left, acc_right  
 
     def pid_controller(self, my_current_state, current_time):
-        print(current_time)
         m = self.sg.m
         w_half = self.sg.w_half
         Iz = self.sg.Iz

@@ -54,7 +54,7 @@ if __name__ == '__main__':
     # ax.set_aspect("equal")
     # plt.show()
 
-    out = "/home/hjlee/ETH_2021_Fall/PDM4AR/PDM4AR-exercises/"
+    out = "/home/hjlee/ETH_2021_Fall/PDM4AR/PDM4AR_github/"
     ex = get_final21()
     for i, alg_in in enumerate(ex.test_values):
         try:
