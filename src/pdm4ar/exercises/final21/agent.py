@@ -20,6 +20,8 @@ import numpy as np
 from numpy.linalg import inv
 import time
 
+import do_mpc
+
 class Node:
     def __init__(self, point, passed=False):
         self.x = point[0]
@@ -48,6 +50,103 @@ class Pdm4arAgent(Agent):
         
         self.test = self.test_point_and_path()
 
+        self.x_ref = 0.0
+        self.y_ref = 0.0
+        self.psi_ref = 0.0
+        
+        self.previous_a_r = 0.0
+        self.previous_a_l = 0.0
+
+        self.model_type = 'discrete'
+        self.mpc_model = do_mpc.model.Model(self.model_type)
+        self.mpc_controller = None
+        self.mpc_estimator = None
+        self.mpc_simulator = None
+    
+
+    def mpc_model_init(self):
+        """
+        MPC model instantiation
+        """
+        # States struct
+        x = self.mpc_model.set_variable('_x', 'x')
+        y = self.mpc_model.set_variable('_x', 'y')
+        psi = self.mpc_model.set_variable('_x', 'psi')
+        dx = self.mpc_model.set_variable('_x', 'dx') # vx
+        dy = self.mpc_model.set_variable('_x', 'dy') # vy
+        dpsi = self.mpc_model.set_variable('_x', 'dpsi')
+        # Input struct
+        a_r = self.mpc_model.set_variable('_u', 'a_r') # right acceleration
+        a_l = self.mpc_model.set_variable('_u', 'a_l') # left acceleration
+        # Certain parameters
+        m = self.sg.m
+        L = self.sg.w_half
+        I = self.sg.Iz
+        # ODEs
+        self.mpc_model.set_rhs('x', np.cos(psi)*dx-np.sin(psi)*dy)
+        self.mpc_model.set_rhs('y', np.sin(psi)*dx+np.cos(psi)*dy)
+        self.mpc_model.set_rhs('psi', dpsi)
+        self.mpc_model.set_rhs('vx', dpsi*dy+a_r+a_l)
+        self.mpc_model.set_rhs('vy', -dx*dpsi)
+        self.mpc_model.set_rhs('dpsi', L*m/I*(a_r-a_l))
+        # Build model
+        self.mpc_model.setup()
+    
+    def mpc_controller_init(self):
+        """
+        MPC controller configuration
+        """
+        self.mpc_controller = do_mpc.controller.MPC(self.mpc_model)
+        setup_mpc = {
+            'n_horizon': 20,
+            'n_robust': 1,
+            'open_loop': 0,
+            't_step': 0.01,
+            'state_discretization': 'collocation',
+            'collocation_type': 'radau',
+            'collocation_deg': 2,
+            'collocation_ni': 2,
+            'store_full_solution': True,
+            'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
+        }
+        self.mpc_controller.set_param(**setup_mpc)
+        # Objective
+        LAMBDA_1 = 1
+        LAMBDA_2 = 1
+        current_point = np.array((self.mpc_model.x['x'], self.mpc_model.x['y']))
+        ref_point = np.array((self.x_ref, self.y_ref))
+        dist = np.sum(np.square(ref_point - current_point))
+        angle = np.square(self.psi_ref - self.mpc_model.x['psi'])
+        cost = LAMBDA_1 * dist + LAMBDA_2 * angle
+        self.mpc_controller.set_objective(mterm=cost, lterm=cost)
+        self.mpc_controller.set_rterm(inp=1.0)
+        # Constraints
+        self.mpc_controller.bounds['lower', '_u', 'a_l'] = -10.0
+        self.mpc_controller.bounds['upper', '_u', 'a_l'] = 10.0
+        self.mpc_controller.bounds['lower', '_u', 'a_r'] = -10.0
+        self.mpc_controller.bounds['upper', '_u', 'a_r'] = 10.0
+        # setup
+        self.mpc_controller.setup()
+    
+    def mpc_estimator_init(self):
+        """
+        MPC estimator setup
+        """
+        self.mpc_estimator = do_mpc.estimator.StateFeedback(self.mpc_model)
+    
+    def mpc_simulator_init(self):
+        """
+        MPC simulator setup
+        """
+        self.mpc_simulator = do_mpc.simulator.Simulator(self.mpc_model)
+        params_simulator = {
+            'integration_tool': 'cvodes',
+            'abstol': 1e-10,
+            'reltol': 1e-10,
+            't_step': 0.01
+        }
+        self.mpc_simulator.set_param(**params_simulator)
+        self.mpc_simulator.setup()
 
     def test_point_and_path(self):
         point1 = Point(80,30).buffer(1)
@@ -87,180 +186,20 @@ class Pdm4arAgent(Agent):
 
         return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
 
-    def brake(self, my_current_state:SpacecraftState):
-        m = self.sg.m
-        w_half = self.sg.w_half
-        Iz = self.sg.Iz
-
-        # Match psi with math.atan2(dy,dx)
-        psi = my_current_state.psi
-        psi = psi % (2*math.pi)
-        if psi > math.pi:
-            psi = -2*math.pi + psi
-
-        psi = my_current_state.psi
-        x = my_current_state.x
-        y = my_current_state.y
-        vx = my_current_state.vx
-        vy = my_current_state.vy
-        dpsi = my_current_state.dpsi  
-
-        # Input: u = [x, y, phi] --> Output: a = [ax, ay, ddphi]
-        KD = 1
-        du_des = [0, 0, 0]
-        du = [vx, vy, dpsi]
-
-        derr = np.array(du_des) - np.array(du) 
-        acc = KD * derr 
-
-        acc_left = 0.5 * (acc[0] + vy/vx*acc[1] - acc[2]*Iz/(w_half*m))
-        acc_right = 0.5 * (acc[0] + vy/vx*acc[1] + acc[2]*Iz/(w_half*m))
-        return acc_left, acc_right
-
-    def rotation_controller(self, my_current_state:SpacecraftState, wanted_angle):
-        m = self.sg.m
-        w_half = self.sg.w_half
-        Iz = self.sg.Iz
-
-        # Match psi with math.atan2(dy,dx)
-        psi = my_current_state.psi
-        psi = psi % (2*math.pi)
-        if psi > math.pi:
-            psi = -2*math.pi + psi
-
-        x = my_current_state.x
-        y = my_current_state.y
-        vx = my_current_state.vx
-        vy = my_current_state.vy
-        dpsi = my_current_state.dpsi  
-
-        KP = .3
-        KD = .6
-
-        u_des = wanted_angle
-        u = psi
-        
-        du_des = 0
-        du = dpsi
-        err = np.array(u_des) - np.array(u)
-        derr = np.array(du_des) - np.array(du) 
-
-        ddpsi = KP * err + KD * derr 
-
-        acc = Iz*ddpsi / (w_half*m)
-
-        acc_left = -acc/2
-        acc_right = acc/2
-        return acc_left, acc_right
-
-    def translation_controller(self, my_current_state:SpacecraftState, x_star=30, y_star=60):
-        m = self.sg.m
-        w_half = self.sg.w_half
-        Iz = self.sg.Iz
-
-        # Match psi with math.atan2(dy,dx)
-        psi = my_current_state.psi
-        psi = psi % (2*math.pi)
-        if psi > math.pi:
-            psi = -2*math.pi + psi
-
-        x = my_current_state.x
-        y = my_current_state.y
-        vx = my_current_state.vx
-        vy = my_current_state.vy
-        dpsi = my_current_state.dpsi  
-
-        KP = .2
-        KD = .2
-        dx, dy = x_star - x, y_star - y
-        u_des = np.sqrt(dx**2 + dy**2)
-        u = 0
-        
-        du_des = 0
-        du = vx
-
-        target_angle = math.atan2(dy,dx)
-        if abs(target_angle - psi) < math.pi/2:
-            err = np.array(u_des) - np.array(u)
-        else:
-            err = -(np.array(u_des) - np.array(u))    
-
-        derr = np.array(du_des) - np.array(du) 
-
-        acc = KP * err + KD * derr 
-
-        acc_left = acc/2
-        acc_right = acc/2
-        
-        return acc_left, acc_right  
-
-    def pid_controller(self, my_current_state, current_time):
-        print(current_time)
-        m = self.sg.m
-        w_half = self.sg.w_half
-        Iz = self.sg.Iz
-
-        # Match psi with math.atan2(dy,dx)
-        psi = my_current_state.psi
-        psi = psi % (2*math.pi)
-        if psi > math.pi:
-            psi = -2*math.pi + psi
-
-        x = my_current_state.x
-        y = my_current_state.y
-        vx = my_current_state.vx
-        vy = my_current_state.vy
-        dpsi = my_current_state.dpsi  
-
-
-        x_star, y_star, psi_star = self.decide_target_point(my_current_state)
-        dx, dy = x_star - x, y_star - y
-        wanted_angle = math.atan2(dy,dx)
-        delta_angle = psi - wanted_angle
-
-
-        # if vx > 1.0 or vy > 1.0 or dpsi > 0.1:
-        #     acc_left, acc_right = self.brake(my_current_state)
-        #     print(f'Brake activated acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, '\
-        #           f'vx: {vx:.8f}, vy: {vy:.8f}, dpsi: {dpsi:.8f}')   
-        # else: 
-        if -math.radians(5) < delta_angle and delta_angle < math.radians(5):
-            acc_left, acc_right = self.translation_controller(my_current_state, x_star, y_star)
-            print(f'Translation Controller acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, vx: {vx:.8f}, vy: {vy:.8f}')
-        else:
-            acc_left, acc_right = self.rotation_controller(my_current_state, wanted_angle)
-            print(f'Rotation Controller acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, '\
-                    f'delta angle: {delta_angle:.8f}, psi: {psi:.8f}, dpsi: {dpsi:.8f}')
-
-        # acc_left, acc_right = self.rotation_controller(my_current_state, wanted_angle)
-        # print(f'Rotation Controller acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, '\
-        #       f'delta angle: {delta_angle:.8f}, psi: {psi:.8f}, dpsi: {dpsi:.8f}')          
-        # acc_left, acc_right = self.velocity_controller(my_current_state)
-        # print(f'Rotation Controller acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, '\
-        #       f'vx: {vx:.8f}, vy: {vy:.8f}, dpsi: {dpsi:.8f}')                            
-        # acc_left, acc_right = 0,0
-
-
-        # if current_time < 1:
-        #     acc_left, acc_right = self.velocity_controller(my_current_state)
-        #     print(f'Rotation Controller acc_left: {acc_left:.8f}, acc_right: {acc_right:.8f}, '\
-        #           f'vx: {vx:.8f}, vy: {vy:.8f}, dpsi: {dpsi:.8f}')    
-        # if current_time > 40:
-        #     print('TIME OVER!!')
-        #     acc_left, acc_right = 9, 9
-
-
-        return acc_left, acc_right
-
-    def decide_target_point(self, my_current_state):
+    def get_target_point(self, my_current_state):
         x = my_current_state.x
         y = my_current_state.y
 
-        dist_table = [math.hypot(node.x - x, node.y - y) if node.passed==False and math.hypot(node.x - x, node.y - y) > self.radius
-                                                         else np.inf for node in self.path_nodes]
+        dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
-        for node in self.path_nodes[:index+1]:
-            node.passed = True
+
+        # Set target as 10 samples ahead
+        LOOK_AHEAD = 10
+        if index + LOOK_AHEAD < len(self.path_nodes):
+            index += LOOK_AHEAD
+        else:
+            index = len(self.path_nodes - 1)
+
         target_node = self.path_nodes[index]
 
         # Calculate path's angle at the target node
