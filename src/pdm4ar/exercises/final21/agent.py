@@ -186,7 +186,7 @@ class Pdm4arAgent(Agent):
 
         return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
 
-    def get_target_point(self, my_current_state):
+    def update_target_point(self, my_current_state):
         x = my_current_state.x
         y = my_current_state.y
 
@@ -209,5 +209,8 @@ class Pdm4arAgent(Agent):
             next_node = target_node
         dx = next_node.x - target_node.x
         dy = next_node.y - target_node.y
-        return target_node.x, target_node.y, math.atan2(dy, dx)
+        # Update reference point
+        self.x_ref = target_node.x
+        self.y_ref = target_node.y
+        self.psi_ref = np.arctan2(dy, dx)
 
