@@ -198,7 +198,7 @@ class Pdm4arAgent(Agent):
         if index + LOOK_AHEAD < len(self.path_nodes):
             index += LOOK_AHEAD
         else:
-            index = len(self.path_nodes - 1)
+            index = len(self.path_nodes - 2) # so index + 1 is not out of bound
 
         target_node = self.path_nodes[index]
 
