@@ -21,6 +21,7 @@ from numpy.linalg import inv
 import time
 
 import do_mpc
+from shapely.geometry import Point
 
 class Node:
     def __init__(self, point, passed=False):
@@ -53,15 +54,12 @@ class Pdm4arAgent(Agent):
         self.x_ref = 0.0
         self.y_ref = 0.0
         self.psi_ref = 0.0
-        
-        self.previous_a_r = 0.0
-        self.previous_a_l = 0.0
 
-        self.model_type = 'discrete'
-        self.mpc_model = do_mpc.model.Model(self.model_type)
-        self.mpc_controller = None
-        self.mpc_estimator = None
-        self.mpc_simulator = None
+        self.mpc_model = self.mpc_model_init()
+        self.mpc_controller = self.mpc_controller_init()
+        self.mpc_estimator = self.mpc_estimator_init()
+        self.mpc_simulator = self.mpc_simulator_init()
+        self.targets = []
 
     # Default Methods
     def get_optimal_path(self):
@@ -82,98 +80,125 @@ class Pdm4arAgent(Agent):
         :param sim_obs:
         :return:
         """
-        my_current_state: SpacecraftState = sim_obs.players[self.name].state
+        current_state: SpacecraftState = sim_obs.players[self.name].state
 
-        current_time = float(sim_obs.time)
-
-        acc_left, acc_right = self.pid_controller(my_current_state, current_time)
-
+        acc_left, acc_right = self.mpc(current_state)
+        
         return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
     
+    def mpc(self, current_state):
+        # Update target point
+        self.update_target_point(current_state)
+        # Get state variable values
+        x = current_state.x
+        y = current_state.y
+        psi = current_state.psi
+        vx = current_state.vx
+        vy = current_state.vy
+        dpsi = current_state.dpsi
+        x0 = np.array([x, y, psi, vx, vy, dpsi]).reshape(-1,1)
+        # Update MPC controller
+        self.mpc_controller = self.mpc_controller_init()
+        self.mpc_estimator = self.mpc_estimator_init()
+        self.mpc_simulator = self.mpc_simulator_init()
+        # Set up controller, simulator and estimator
+        self.mpc_controller.x0 = x0
+        self.mpc_simulator.x0 = x0
+        self.mpc_estimator.x0 = x0
+        self.mpc_controller.set_initial_guess()
+        # Run close loop
+        n_steps = 10
+        for i in range(n_steps):
+            u0 = self.mpc_controller.make_step(x0)
+            y_next = self.mpc_simulator.make_step(u0)
+            x0 = self.mpc_estimator.make_step(y_next)
+        # Extract accelerations
+        acc_left = np.squeeze(self.mpc_controller.data['_u', 'a_l'][0])
+        acc_right = np.squeeze(self.mpc_controller.data['_u', 'a_r'][0])
+        return acc_left, acc_right
+
     # MPC Controller
     def mpc_model_init(self):
         """
         MPC model instantiation
         """
         # States struct
-        x = self.mpc_model.set_variable('_x', 'x')
-        y = self.mpc_model.set_variable('_x', 'y')
-        psi = self.mpc_model.set_variable('_x', 'psi')
-        vx = self.mpc_model.set_variable('_x', 'dx') # vx
-        vy = self.mpc_model.set_variable('_x', 'dy') # vy
-        dpsi = self.mpc_model.set_variable('_x', 'dpsi')
+        model_type = 'discrete'
+        mpc_model = do_mpc.model.Model(model_type)
+        x = mpc_model.set_variable('_x', 'x')
+        y = mpc_model.set_variable('_x', 'y')
+        psi = mpc_model.set_variable('_x', 'psi')
+        vx = mpc_model.set_variable('_x', 'vx') # vx
+        vy = mpc_model.set_variable('_x', 'vy') # vy
+        dpsi = mpc_model.set_variable('_x', 'dpsi')
         # Input struct
-        a_r = self.mpc_model.set_variable('_u', 'a_r') # right acceleration
-        a_l = self.mpc_model.set_variable('_u', 'a_l') # left acceleration
+        a_l = mpc_model.set_variable('_u', 'a_l') # left acceleration
+        a_r = mpc_model.set_variable('_u', 'a_r') # right acceleration
         # Certain parameters
         m = self.sg.m
         L = self.sg.w_half
         I = self.sg.Iz
         # ODEs
-        self.mpc_model.set_rhs('x', np.cos(psi)*vx-np.sin(psi)*vy)
-        self.mpc_model.set_rhs('y', np.sin(psi)*vx+np.cos(psi)*vy)
-        self.mpc_model.set_rhs('psi', dpsi)
-        self.mpc_model.set_rhs('vx', dpsi*vy+a_r+a_l)
-        self.mpc_model.set_rhs('vy', -vx*dpsi)
-        self.mpc_model.set_rhs('dpsi', L*m/I*(a_r-a_l))
+        mpc_model.set_rhs('x', np.cos(psi)*vx-np.sin(psi)*vy)
+        mpc_model.set_rhs('y', np.sin(psi)*vx+np.cos(psi)*vy)
+        mpc_model.set_rhs('psi', dpsi)
+        mpc_model.set_rhs('vx', dpsi*vy+a_r+a_l)
+        mpc_model.set_rhs('vy', -vx*dpsi)
+        mpc_model.set_rhs('dpsi', L*m/I*(a_r-a_l))
         # Build model
-        self.mpc_model.setup()
+        mpc_model.setup()
+        return mpc_model
     
     def mpc_controller_init(self):
         """
         MPC controller configuration
         """
-        self.mpc_controller = do_mpc.controller.MPC(self.mpc_model)
+        mpc_controller = do_mpc.controller.MPC(self.mpc_model)
         setup_mpc = {
-            'n_horizon': 20,
-            'n_robust': 1,
-            'open_loop': 0,
+            'n_horizon': 5,
+            'n_robust': 0,
             't_step': 0.01,
-            'state_discretization': 'collocation',
-            'collocation_type': 'radau',
-            'collocation_deg': 2,
-            'collocation_ni': 2,
             'store_full_solution': True,
-            'nlpsol_opts': {'ipopt.linear_solver': 'MA27'}
+            'state_discretization': 'discrete'
         }
-        self.mpc_controller.set_param(**setup_mpc)
+        mpc_controller.set_param(**setup_mpc)
         # Objective
-        LAMBDA_1 = 1
-        LAMBDA_2 = 1
-        current_point = np.array((self.mpc_model.x['x'], self.mpc_model.x['y']))
-        ref_point = np.array((self.x_ref, self.y_ref))
-        dist = np.sum(np.square(ref_point - current_point))
-        angle = np.square(self.psi_ref - self.mpc_model.x['psi'])
+        LAMBDA_1 = 10
+        LAMBDA_2 = 3
+        dist = (self.x_ref-self.mpc_model.x['x'])**2 + (self.y_ref-self.mpc_model.x['y'])**2
+        angle = (self.psi_ref - self.mpc_model.x['psi'])**2
         cost = LAMBDA_1 * dist + LAMBDA_2 * angle
-        self.mpc_controller.set_objective(mterm=cost, lterm=cost)
-        self.mpc_controller.set_rterm(inp=1.0)
+        mpc_controller.set_objective(mterm=cost, lterm=cost)
+        mpc_controller.set_rterm(a_r=1, a_l=1)
         # Constraints
-        self.mpc_controller.bounds['lower', '_u', 'a_l'] = -10.0
-        self.mpc_controller.bounds['upper', '_u', 'a_l'] = 10.0
-        self.mpc_controller.bounds['lower', '_u', 'a_r'] = -10.0
-        self.mpc_controller.bounds['upper', '_u', 'a_r'] = 10.0
+        mpc_controller.bounds['lower', '_u', 'a_l'] = -10.0
+        mpc_controller.bounds['upper', '_u', 'a_l'] = 10.0
+        mpc_controller.bounds['lower', '_u', 'a_r'] = -10.0
+        mpc_controller.bounds['upper', '_u', 'a_r'] = 10.0
+
+        mpc_controller.bounds['lower', '_x', 'vx'] = -5.0
+        mpc_controller.bounds['upper', '_x', 'vx'] = 5.0
+        mpc_controller.bounds['lower', '_x', 'vy'] = -5.0
+        mpc_controller.bounds['upper', '_x', 'vy'] = 5.0
         # setup
-        self.mpc_controller.setup()
+        mpc_controller.setup()
+        return mpc_controller
     
     def mpc_estimator_init(self):
         """
         MPC estimator setup
         """
-        self.mpc_estimator = do_mpc.estimator.StateFeedback(self.mpc_model)
+        mpc_estimator = do_mpc.estimator.StateFeedback(self.mpc_model)
+        return mpc_estimator
     
     def mpc_simulator_init(self):
         """
         MPC simulator setup
         """
-        self.mpc_simulator = do_mpc.simulator.Simulator(self.mpc_model)
-        params_simulator = {
-            'integration_tool': 'cvodes',
-            'abstol': 1e-10,
-            'reltol': 1e-10,
-            't_step': 0.01
-        }
-        self.mpc_simulator.set_param(**params_simulator)
-        self.mpc_simulator.setup()
+        mpc_simulator = do_mpc.simulator.Simulator(self.mpc_model)
+        mpc_simulator.set_param(t_step=0.01)
+        mpc_simulator.setup()
+        return mpc_simulator
 
     def update_target_point(self, my_current_state):
         x = my_current_state.x
@@ -182,12 +207,11 @@ class Pdm4arAgent(Agent):
         dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
 
-        # Set target as 10 samples ahead
-        LOOK_AHEAD = 10
+        LOOK_AHEAD = 5
         if index + LOOK_AHEAD < len(self.path_nodes):
             index += LOOK_AHEAD
         else:
-            index = len(self.path_nodes - 2) # so index + 1 is not out of bound
+            index = len(self.path_nodes)-2 # so index + 1 is not out of bound
 
         target_node = self.path_nodes[index]
 
@@ -202,6 +226,12 @@ class Pdm4arAgent(Agent):
         self.x_ref = target_node.x
         self.y_ref = target_node.y
         self.psi_ref = np.arctan2(dy, dx)
+
+        # self.x_ref = 30
+        # self.y_ref = 5
+        # self.psi_ref = np.pi/4
+
+        self.targets.append(Point(self.x_ref, self.y_ref))
     
     # Testing Method
     def test_point_and_path(self):
