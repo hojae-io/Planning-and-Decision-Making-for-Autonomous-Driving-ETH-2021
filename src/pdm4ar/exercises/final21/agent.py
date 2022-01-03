@@ -71,11 +71,15 @@ class Pdm4arAgent(Agent):
         self.curr_state = np.array([0,0,0,0,0,0])
         self.goal_state = np.array([0,0,0,0,0,0])
 
-        self.model_type = 'discrete'
-        self.mpc_model = do_mpc.model.Model(self.model_type)
-        self.mpc_controller = None
-        self.mpc_estimator = None
-        self.mpc_simulator = None
+        self.x_ref = 20
+        self.y_ref = 10
+        self.psi_ref = np.pi/4
+
+        self.mpc_model = self.mpc_model_init()
+        self.mpc_controller = self.mpc_controller_init()
+        self.mpc_estimator = self.mpc_estimator_init()
+        self.mpc_simulator = self.mpc_simulator_init()
+
 
 
     def get_optimal_path(self):
@@ -104,7 +108,7 @@ class Pdm4arAgent(Agent):
         # acc_left, acc_right = self.integrated_ltvlqr_controller(my_current_state)
         # acc_left, acc_right = self.blog_ltvlqr_controller(my_current_state)
         # acc_left, acc_right = self.my_controller(my_current_state)
-        acc_left, acc_right = self.mpc_controller(my_current_state)
+        acc_left, acc_right = self.mpc(my_current_state)
 
         # if len(self.path_nodes) != 1:
         #     self.path_nodes.pop(0)
@@ -112,44 +116,7 @@ class Pdm4arAgent(Agent):
             acc_left, acc_right = 9, 9
         return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
 
-    def mpc_model_init(self):
-        """
-        MPC model instantiation
-        """
-        # States struct
-        x = self.mpc_model.set_variable(var_type='_x', var_name='x', shape=(1,1))
-        y = self.mpc_model.set_variable('_x', 'y')
-        psi = self.mpc_model.set_variable('_x', 'psi')
-        vx = self.mpc_model.set_variable('_x', 'vx') # vx
-        vy = self.mpc_model.set_variable('_x', 'vy') # vy
-        dpsi = self.mpc_model.set_variable('_x', 'dpsi')
-
-        # Input struct
-        u_r = self.mpc_model.set_variable('_u', 'u_r') # right acceleration
-        u_l = self.mpc_model.set_variable('_u', 'u_l') # left acceleration
-
-        # Certain parameters
-        m = self.sg.m
-        L = self.sg.w_half
-        I = self.sg.Iz
-
-        # ODEs
-        self.mpc_model.set_rhs('x', np.cos(psi)*vx-np.sin(psi)*vy)
-        self.mpc_model.set_rhs('y', np.sin(psi)*vx+np.cos(psi)*vy)
-        self.mpc_model.set_rhs('psi', dpsi)
-        self.mpc_model.set_rhs('vx', dpsi*vy+u_r+u_l)
-        self.mpc_model.set_rhs('vy', -vx*dpsi)
-        self.mpc_model.set_rhs('dpsi', L*m/I*(u_r-u_l))
-
-        self.mpc_model.setup()
-
-    def mpc_controller_init(self):
-        """
-        MPC controller configuration
-        """
-        self.mpc_controller = do_mpc.controller.MPC(self.mpc_model)
-
-    def mpc_controller(self, my_current_state:SpacecraftState):
+    def mpc(self, my_current_state:SpacecraftState):
         x, y, psi, vx, vy, dpsi = \
             my_current_state.x, my_current_state.y, my_current_state.psi, my_current_state.vx, my_current_state.vy, my_current_state.dpsi
         print(f'[Current State] x:{x:.5f}, y:{y:.5f}, psi:{psi:.5f}, vx:{vx:.5f}, vy:{vy:.5f}, dpsi:{dpsi:.5f}')
@@ -160,12 +127,117 @@ class Pdm4arAgent(Agent):
 
         # x_star, y_star, psi_star, index = self.decide_target_point(my_current_state)
         x_star, y_star, psi_star = 20, 10, math.pi/4
-        self.curr_state = np.array([x, y, psi, vx, vy, dpsi])
-        self.goal_state = np.array([x_star, y_star, psi_star, 0, 0, 0])
+        self.curr_state = np.array([x, y, psi, vx, vy, dpsi]).reshape(-1, 1)
+        x0 = self.curr_state
+        self.goal_state = np.array([x_star, y_star, psi_star, 0, 0, 0]).reshape(-1, 1)
 
-        # TODO
+        self.mpc_controller.x0 = x0
+        self.mpc_simulator.x0 = x0
+        self.mpc_estimator.x0 = x0
+
+        self.mpc_controller.set_initial_guess()
+
+        n_steps = 20
+        for i in range(n_steps):
+            u0 = self.mpc_controller.make_step(x0)
+            y_next = self.mpc_simulator.make_step(u0)
+            x0 = self.mpc_estimator.make_step(y_next)
+
+        acc_left = np.squeeze(self.mpc_controller.data['_u', 'u_l'][0])
+        acc_right = np.squeeze(self.mpc_controller.data['_u', 'u_r'][0])
 
         return acc_left, acc_right
+
+    def mpc_model_init(self):
+        """
+        MPC model instantiation
+        """
+        model_type = 'discrete'
+        mpc_model = do_mpc.model.Model(model_type)
+
+        # States struct
+        x = mpc_model.set_variable(var_type='_x', var_name='x', shape=(1,1))
+        y = mpc_model.set_variable('_x', 'y')
+        psi = mpc_model.set_variable('_x', 'psi')
+        vx = mpc_model.set_variable('_x', 'vx') # vx
+        vy = mpc_model.set_variable('_x', 'vy') # vy
+        dpsi = mpc_model.set_variable('_x', 'dpsi')
+
+        # Input struct
+        u_r = mpc_model.set_variable('_u', 'u_r') # right acceleration
+        u_l = mpc_model.set_variable('_u', 'u_l') # left acceleration
+
+        # Certain parameters
+        m = self.sg.m
+        L = self.sg.w_half
+        I = self.sg.Iz
+
+        # ODEs
+        mpc_model.set_rhs('x', np.cos(psi)*vx-np.sin(psi)*vy)
+        mpc_model.set_rhs('y', np.sin(psi)*vx+np.cos(psi)*vy)
+        mpc_model.set_rhs('psi', dpsi)
+        mpc_model.set_rhs('vx', dpsi*vy+u_r+u_l)
+        mpc_model.set_rhs('vy', -vx*dpsi)
+        mpc_model.set_rhs('dpsi', L*m/I*(u_r-u_l))
+
+        mpc_model.setup()
+
+        return mpc_model
+
+    def mpc_controller_init(self):
+        """
+        MPC controller configuration
+        """
+        mpc_controller = do_mpc.controller.MPC(self.mpc_model)
+        setup_mpc = {
+            'n_horizon': 5,
+            'n_robust': 0,
+            't_step': 0.01,
+            'store_full_solution': True,
+            'state_discretization': 'discrete'
+        }
+        mpc_controller.set_param(**setup_mpc)
+        LAMBDA_1 = 10
+        LAMBDA_2 = 3
+        dist = (self.x_ref-self.mpc_model.x['x'])**2 + (self.y_ref-self.mpc_model.x['y'])**2
+        angle = (self.psi_ref - self.mpc_model.x['psi'])**2
+        cost = LAMBDA_1 * dist + LAMBDA_2 * angle
+        mpc_controller.set_objective(mterm=cost, lterm=cost)
+        mpc_controller.set_rterm(u_r=1, u_l=1)
+
+        mpc_controller.bounds['lower', '_u', 'u_l'] = -10.0
+        mpc_controller.bounds['upper', '_u', 'u_l'] = 10.0
+        mpc_controller.bounds['lower', '_u', 'u_r'] = -10.0
+        mpc_controller.bounds['upper', '_u', 'u_r'] = 10.0
+
+        mpc_controller.bounds['lower', '_x', 'vx'] = -50
+        mpc_controller.bounds['upper', '_x', 'vx'] = 50
+        mpc_controller.bounds['lower', '_x', 'vy'] = -50
+        mpc_controller.bounds['upper', '_x', 'vy'] = 50
+        mpc_controller.bounds['lower', '_x', 'dpsi'] = -2*np.pi
+        mpc_controller.bounds['upper', '_x', 'dpsi'] = 2*np.pi
+
+        # setup
+        mpc_controller.setup()
+        return mpc_controller
+
+    def mpc_simulator_init(self):
+        """
+        MPC simulator setup
+        """
+        mpc_simulator = do_mpc.simulator.Simulator(self.mpc_model)
+        mpc_simulator.set_param(t_step=0.1)
+        mpc_simulator.setup()
+        return mpc_simulator
+
+    def mpc_estimator_init(self):
+        """
+        MPC estimator setup
+        """
+        mpc_estimator = do_mpc.estimator.StateFeedback(self.mpc_model)
+        return mpc_estimator
+
+
 
 
     def my_controller(self, my_current_state:SpacecraftState):
@@ -204,18 +276,18 @@ class Pdm4arAgent(Agent):
 
         return acc_left, acc_right
 
-    # def F(self, u):
-    #     x0, y0, psi0, vx0, vy0, dpsi0 = \
-    #         self.curr_state[0], self.curr_state[1], self.curr_state[2], self.curr_state[3], self.curr_state[4], self.curr_state[5]
+    def F(self, u):
+        x0, y0, psi0, vx0, vy0, dpsi0 = \
+            self.curr_state[0], self.curr_state[1], self.curr_state[2], self.curr_state[3], self.curr_state[4], self.curr_state[5]
 
-    #     expected = np.array([x0 + vx0*(np.cos(psi0)/100 + np.cos(dpsi0/100 + psi0)/100 - (dpsi0*np.sin(dpsi0/100 + psi0))/10000) - vy0*(np.sin(dpsi0/100 + psi0)/100 + np.sin(psi0)/100 - (dpsi0*np.cos(dpsi0/100 + psi0))/10000) + (u[0]*np.cos(dpsi0/100 + psi0))/2000 + (u[1]*np.cos(dpsi0/100 + psi0))/2000,
-    #                         y0 + vy0*(np.cos(psi0)/100 + np.cos(dpsi0/100 + psi0)/100 + (dpsi0*np.sin(dpsi0/100 + psi0))/10000) + vx0*(np.sin(dpsi0/100 + psi0)/100 + np.sin(psi0)/100 + (dpsi0*np.cos(dpsi0/100 + psi0))/10000) + (u[0]*np.sin(dpsi0/100 + psi0))/2000 + (u[1]*np.sin(dpsi0/100 + psi0))/2000,
-    #                         dpsi0/50 + psi0 - u[0]/4000 + u[1]/4000,
-    #                         u[0]/10 + u[1]/10 + vy0*(dpsi0/50 - u[0]/4000 + u[1]/4000) + vx0*((dpsi0*(dpsi0/100 - u[0]/4000 + u[1]/4000))/100 + 1),
-    #                         u[0]*(dpsi0/2000 - u[0]/80000 + u[1]/80000) + u[1]*(dpsi0/2000 - u[0]/80000 + u[1]/80000) + vx0*(dpsi0/50 - u[0]/4000 + u[1]/4000) + vy0*((dpsi0*(dpsi0/100 - u[0]/4000 + u[1]/4000))/100 + 1),
-    #                         dpsi0 - u[0]/20 + u[1]/20])
+        expected = np.array([x0 + vx0*(np.cos(psi0)/100 + np.cos(dpsi0/100 + psi0)/100 - (dpsi0*np.sin(dpsi0/100 + psi0))/10000) - vy0*(np.sin(dpsi0/100 + psi0)/100 + np.sin(psi0)/100 - (dpsi0*np.cos(dpsi0/100 + psi0))/10000) + (u[0]*np.cos(dpsi0/100 + psi0))/2000 + (u[1]*np.cos(dpsi0/100 + psi0))/2000,
+                            y0 + vy0*(np.cos(psi0)/100 + np.cos(dpsi0/100 + psi0)/100 + (dpsi0*np.sin(dpsi0/100 + psi0))/10000) + vx0*(np.sin(dpsi0/100 + psi0)/100 + np.sin(psi0)/100 + (dpsi0*np.cos(dpsi0/100 + psi0))/10000) + (u[0]*np.sin(dpsi0/100 + psi0))/2000 + (u[1]*np.sin(dpsi0/100 + psi0))/2000,
+                            dpsi0/50 + psi0 - u[0]/4000 + u[1]/4000,
+                            u[0]/10 + u[1]/10 + vy0*(dpsi0/50 - u[0]/4000 + u[1]/4000) + vx0*((dpsi0*(dpsi0/100 - u[0]/4000 + u[1]/4000))/100 + 1),
+                            u[0]*(dpsi0/2000 - u[0]/80000 + u[1]/80000) + u[1]*(dpsi0/2000 - u[0]/80000 + u[1]/80000) + vx0*(dpsi0/50 - u[0]/4000 + u[1]/4000) + vy0*((dpsi0*(dpsi0/100 - u[0]/4000 + u[1]/4000))/100 + 1),
+                            dpsi0 - u[0]/20 + u[1]/20])
 
-    #     return expected - self.goal_state
+        return expected - self.goal_state
 
     def blog_ltvlqr_controller(self, my_current_state:SpacecraftState):
         # Linear Time Varying Linear Quadratic Regulator
