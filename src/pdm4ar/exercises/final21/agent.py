@@ -1,5 +1,4 @@
 from typing import Sequence
-from casadi.casadi import sqrt
 from decorator import decorator
 
 from dg_commons import PlayerName
@@ -10,20 +9,16 @@ from dg_commons.sim.models.obstacles import StaticObstacle
 from dg_commons.sim.models.spacecraft import SpacecraftModel, SpacecraftCommands, SpacecraftState
 from dg_commons.sim.models.spacecraft_structures import SpacecraftGeometry, SpacecraftParameters
 from numpy.core import multiarray
-from shapely.geometry import point, LineString, LinearRing, Polygon
-from shapely.geometry.point import Point
+from shapely.geometry import Point, LineString, LinearRing, Polygon
 
 from pdm4ar.exercises_def.final21.scenario import get_dgscenario
 from copy import deepcopy
 from pdm4ar.exercises.final21.rrt_star import RrtStar
 import math
 import numpy as np
-from numpy.linalg import inv
 import time
 
 import do_mpc
-from shapely.geometry import Point
-
 import casadi as cas
 
 class Node:
@@ -59,8 +54,6 @@ class Pdm4arAgent(Agent):
             else:
                 angle = 0
             self.path_nodes.append(Node(point, angle))
-        
-        # self.test = self.test_point_and_path()
 
         self.x_ref = 0.0
         self.y_ref = 0.0
@@ -72,7 +65,7 @@ class Pdm4arAgent(Agent):
         self.x_obs = []
         self.y_obs = []
 
-        self.dynamic_obs_check = False
+        self.dynamic_obs_present = False
         self.x_static_obs = None
         self.y_static_obs = None
         self.x_dynamic_obs = None
@@ -80,14 +73,19 @@ class Pdm4arAgent(Agent):
 
         self.mpc_model = None
         self.mpc_controller = None
-        # self.mpc_estimator = self.mpc_estimator_init()
-        # self.mpc_simulator = self.mpc_simulator_init()
+
         self.targets = []
 
     # Default Methods
     def get_optimal_path(self):
         _, _, start = get_dgscenario()
-        rrt_start = RrtStar(start=start, goal=self.goal, static_obstacles=deepcopy([s_obstacle.shape.buffer(3) for s_obstacle in self.static_obstacles]))
+        rrt_start = RrtStar(
+            start=start,
+            goal=self.goal,
+            static_obstacles=deepcopy(
+                [s_obstacle.shape.buffer(3) for s_obstacle in self.static_obstacles]
+            )
+        )
         optimal_path, path_list = rrt_start.planning()
         return optimal_path, path_list, start
         
@@ -111,17 +109,20 @@ class Pdm4arAgent(Agent):
 
         # Dynamic obstacles present
         if(len(sim_obs.players)) > 1:
-            self.dynamic_obs_check = True
+            self.dynamic_obs_present = True
             # Update dynamic obstacles
             self.update_dynamic_obs_coords(sim_obs)
         else:
-            self.dynamic_obs_check = False
+            self.dynamic_obs_present = False
 
         acc_left, acc_right = self.mpc(current_state)
         
         return SpacecraftCommands(acc_left=acc_left, acc_right=acc_right)
     
     def mpc(self, current_state):
+        """
+        Calculate required accelrations using MPC controller
+        """
         self.mpc_model = self.mpc_model_init()
         # Update target point
         self.update_target_point(current_state)
@@ -138,12 +139,8 @@ class Pdm4arAgent(Agent):
         x0 = np.array([x, y, psi, vx, vy, dpsi]).reshape(-1,1)
         # Update MPC controller
         self.mpc_controller = self.mpc_controller_init()
-        # self.mpc_estimator = self.mpc_estimator_init()
-        # self.mpc_simulator = self.mpc_simulator_init()
-        # Set up controller, simulator and estimator
+        # Set up controller
         self.mpc_controller.x0 = x0
-        # self.mpc_simulator.x0 = x0
-        # self.mpc_estimator.x0 = x0
         self.mpc_controller.set_initial_guess()
         # MPC steps
         u0 = self.mpc_controller.make_step(x0)
@@ -180,18 +177,16 @@ class Pdm4arAgent(Agent):
         mpc_model.set_rhs('vx', dpsi*vy+u_r+u_l)
         mpc_model.set_rhs('vy', -vx*dpsi)
         mpc_model.set_rhs('dpsi', L*m/I*(u_r-u_l))
-        
         #Auxiliary
         dist_static = mpc_model.set_expression(
             'dist_static',
             cas.mmin(cas.sqrt((self.x_static_obs-x)**2+(self.y_static_obs-y)**2))
         )
-        if self.dynamic_obs_check:
+        if self.dynamic_obs_present:
             dist_dynamic = mpc_model.set_expression(
                 'dist_dynamic',
                 cas.mmin(cas.sqrt((self.x_dynamic_obs-x)**2+(self.y_dynamic_obs-y)**2))
             )
-
         # Build model
         mpc_model.setup()
         return mpc_model
@@ -229,7 +224,7 @@ class Pdm4arAgent(Agent):
             ub=-sp_l,
             soft_constraint=True
         )
-        if self.dynamic_obs_check:
+        if self.dynamic_obs_present:
             mpc_controller.set_nl_cons(
                 'dist_dynamic',
                 -self.mpc_model.aux['dist_dynamic'],
@@ -262,12 +257,13 @@ class Pdm4arAgent(Agent):
         return mpc_simulator
 
     def update_target_point(self, my_current_state):
+        """
+        Update the next target point
+        """
         x = my_current_state.x
         y = my_current_state.y
-
         dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
-
         LOOK_AHEAD = 12
         if index + LOOK_AHEAD < len(self.path_nodes):
             index += LOOK_AHEAD
@@ -275,7 +271,6 @@ class Pdm4arAgent(Agent):
             index = len(self.path_nodes)-2 # so index + 1 is not out of bound
 
         target_node = self.path_nodes[index]
-
         # Calculate path's angle at the target node
         if index != len(self.path_nodes)-1:
             next_node = self.path_nodes[index+1]
@@ -291,6 +286,9 @@ class Pdm4arAgent(Agent):
         self.targets.append(Point(self.x_ref, self.y_ref))
 
     def update_dynamic_obs_coords(self, sim_obs):
+        """
+        Update coordinates of the dynamic obstacles
+        """
         coords = None
         for player in sim_obs.players:
             # Update all other players
@@ -310,24 +308,11 @@ class Pdm4arAgent(Agent):
         else:
             self.x_dynamic_obs = cas.SX(coords[0])
             self.y_dynamic_obs = cas.SX(coords[1])
-
-    # def get_min_dist_to_static_obs(self, x, y):
-    #     point = Point(x, y)
-    #     min_dist = min([obs.shape.distance(point) for obs in self.static_obstacles])
-    #     print(min_dist)
-    #     return min_dist
-    
-    # def _get_min_dist_to_static_obs(self, x, y):
-    #     min_dist = np.inf
-    #     for point in self.static_obs_coords:
-    #         _dist = math.sqrt(cas.SX(point[0]-x)**2+cas.SX(point[1]-y)**2)
-    #         if _dist < min_dist:
-    #             min_dist = _dist
-    #     print(min_dist)
-    #     min_dist = cas.SX(min_dist)
-    #     return min_dist
     
     def get_static_obs_coords(self):
+        """
+        Get the (exterior) coordinates of static obstacles
+        """
         coords = None
         for obs in self.static_obstacles:
             if isinstance(obs.shape, LinearRing):
@@ -341,16 +326,3 @@ class Pdm4arAgent(Agent):
         x = cas.SX(coords[:, 0])
         y = cas.SX(coords[:, 1])
         return x, y
-    
-    # Testing Method
-    def test_point_and_path(self):
-        point1 = Point(80,30).buffer(1)
-        point2 = Point(30,60).buffer(1)
-        point3 = Point(60,60).buffer(1)
-        point4 = Point(60,30).buffer(1)
-        point5 = Point(40, 20).buffer(1)
-        path = LineString([[7, 4], [30, 30], [30, 60], [60, 60], [60, 30]])
-        path2 = LineString([[20, 20], [20+20, 20+20*math.sqrt(3)]])
-        path3 = LineString([[20, 20], [20+20, 20]])
-
-        return [point1, point2, point3, point4, point5, path, path2, path3]

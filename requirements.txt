@@ -11,4 +11,5 @@ reprep-z6>=6.0.3,<7
 tqdm
 
 do-mpc==4.3.1
+casadi==3.5.5
 
