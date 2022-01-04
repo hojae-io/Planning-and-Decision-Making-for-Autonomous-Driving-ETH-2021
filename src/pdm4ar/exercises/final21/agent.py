@@ -221,7 +221,8 @@ class Pdm4arAgent(Agent):
         mpc_controller.set_nl_cons(
             'dist_static',
             -self.mpc_model.aux['dist_static'],
-            ub=-sp_l
+            ub=-sp_l,
+            soft_constraint=True
         )
         if self.dynamic_obs_check:
             mpc_controller.set_nl_cons(
@@ -233,8 +234,8 @@ class Pdm4arAgent(Agent):
         # mpc_controller.bounds['upper', '_x', 'vx'] = 50
         # mpc_controller.bounds['lower', '_x', 'vy'] = -50
         # mpc_controller.bounds['upper', '_x', 'vy'] = 50
-        mpc_controller.bounds['lower', '_x', 'dpsi'] = -np.pi
-        mpc_controller.bounds['upper', '_x', 'dpsi'] = np.pi
+        mpc_controller.bounds['lower', '_x', 'dpsi'] = -.5*np.pi
+        mpc_controller.bounds['upper', '_x', 'dpsi'] = .5*np.pi
         # setup
         mpc_controller.setup()
         return mpc_controller
@@ -262,7 +263,7 @@ class Pdm4arAgent(Agent):
         dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
 
-        LOOK_AHEAD = 10
+        LOOK_AHEAD = 12
         if index + LOOK_AHEAD < len(self.path_nodes):
             index += LOOK_AHEAD
         else:
