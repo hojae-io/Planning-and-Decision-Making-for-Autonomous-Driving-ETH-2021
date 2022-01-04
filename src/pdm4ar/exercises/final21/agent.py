@@ -60,7 +60,7 @@ class Pdm4arAgent(Agent):
                 angle = 0
             self.path_nodes.append(Node(point, angle))
         
-        self.test = self.test_point_and_path()
+        # self.test = self.test_point_and_path()
 
         self.x_ref = 0.0
         self.y_ref = 0.0
@@ -73,7 +73,8 @@ class Pdm4arAgent(Agent):
         self.y_obs = []
 
         self.dynamic_obs_check = False
-        self.x_static_obs, self.y_static_obs = self.get_static_obs_coords()
+        self.x_static_obs = None
+        self.y_static_obs = None
         self.x_dynamic_obs = None
         self.y_dynamic_obs = None
 
@@ -103,6 +104,10 @@ class Pdm4arAgent(Agent):
         :return:
         """
         current_state: SpacecraftState = sim_obs.players[self.name].state
+
+        # Static obstacles
+        if self.x_static_obs is None:
+            self.x_static_obs, self.y_static_obs = self.get_static_obs_coords()
 
         # Dynamic obstacles present
         if(len(sim_obs.players)) > 1:
