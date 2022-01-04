@@ -1,5 +1,4 @@
 from typing import Sequence
-from decorator import decorator
 
 from dg_commons import PlayerName
 from dg_commons.planning import PolygonGoal
@@ -8,13 +7,14 @@ from dg_commons.sim.agents import Agent
 from dg_commons.sim.models.obstacles import StaticObstacle
 from dg_commons.sim.models.spacecraft import SpacecraftModel, SpacecraftCommands, SpacecraftState
 from dg_commons.sim.models.spacecraft_structures import SpacecraftGeometry, SpacecraftParameters
-
+from shapely.geometry import LinearRing
 from pdm4ar.exercises_def.final21.scenario import get_dgscenario
 from copy import deepcopy
 from pdm4ar.exercises.final21.rrt_star import RrtStar
 import math
 import numpy as np
 import do_mpc
+import casadi as cas
 
 class Node:
     def __init__(self, point, psi=np.pi/2, passed=False):
@@ -40,7 +40,6 @@ class Pdm4arAgent(Agent):
         self.sp = sp
         optimal_path, path_list, start = self.get_optimal_path()
         self.optimal_path = optimal_path
-        self.radius = 1.5
         self.path_nodes = []
         for idx, point in enumerate(path_list):
             if idx != len(path_list)-1:
@@ -51,10 +50,15 @@ class Pdm4arAgent(Agent):
                 angle = 0
             self.path_nodes.append(Node(point, angle))
 
-
         self.x_ref = 0
         self.y_ref = 0
         self.psi_ref = 0
+        self.dpsi_ref = 0
+
+        self.dynamic_obs_check = False
+        self.x_static_obs, self.y_static_obs = self.get_static_obs_coords()
+        self.x_dynamic_obs = None
+        self.y_dynamic_obs = None
 
         self.mpc_model = self.mpc_model_init()
         self.mpc_controller = self.mpc_controller_init()
@@ -92,14 +96,14 @@ class Pdm4arAgent(Agent):
         if psi > math.pi:   
             psi = -2*math.pi + psi
 
+        # Set the local goal points
         x_star, y_star, psi_star, index = self.decide_target_point(my_current_state)
-        self.x_ref, self.y_ref, self.psi_ref = x_star, y_star, psi_star
+        self.x_ref, self.y_ref, self.psi_ref, self.dpsi_ref = x_star, y_star, psi_star, 0
 
         self.mpc_controller = self.mpc_controller_init()
 
         self.curr_state = np.array([x, y, psi, vx, vy, dpsi]).reshape(-1, 1)
         x0 = self.curr_state
-        self.goal_state = np.array([x_star, y_star, psi_star, 0, 0, 0]).reshape(-1, 1)
 
         self.mpc_controller.x0 = x0
 
@@ -143,6 +147,17 @@ class Pdm4arAgent(Agent):
         mpc_model.set_rhs('vy', -vx*dpsi)
         mpc_model.set_rhs('dpsi', L*m/I*(u_r-u_l))
 
+        #Auxiliary
+        dist_static = mpc_model.set_expression(
+            'dist_static',
+            cas.mmin(cas.sqrt((self.x_static_obs-x)**2+(self.y_static_obs-y)**2))
+        )
+        if self.dynamic_obs_check:
+            dist_dynamic = mpc_model.set_expression(
+                'dist_dynamic',
+                cas.mmin(cas.sqrt((self.x_dynamic_obs-x)**2+(self.y_dynamic_obs-y)**2))
+            )
+
         mpc_model.setup()
 
         return mpc_model
@@ -159,16 +174,18 @@ class Pdm4arAgent(Agent):
             'store_full_solution': True,
         }
         mpc_controller.set_param(**setup_mpc)
-        LAMBDA_1 = 5   
+
+        # Objective function
+        LAMBDA_1 = 7
         LAMBDA_2 = 10
-        a = self.mpc_model.x['x']
         dist = (self.x_ref-self.mpc_model.x['x'])**2 + (self.y_ref-self.mpc_model.x['y'])**2
         angle = (self.psi_ref - self.mpc_model.x['psi'])**2
         cost = LAMBDA_1 * dist + LAMBDA_2 * angle
-        # Control 
         mpc_controller.set_objective(mterm=cost, lterm=cost)
         mpc_controller.set_rterm(u_r=1, u_l=1)
-
+        
+        
+        # Constraints
         mpc_controller.bounds['lower', '_u', 'u_l'] = -10.0
         mpc_controller.bounds['upper', '_u', 'u_l'] = 10.0
         mpc_controller.bounds['lower', '_u', 'u_r'] = -10.0
@@ -181,23 +198,74 @@ class Pdm4arAgent(Agent):
         mpc_controller.bounds['lower', '_x', 'dpsi'] = -2*np.pi
         mpc_controller.bounds['upper', '_x', 'dpsi'] = 2*np.pi
 
+        sp_l = self.sg.lf + self.sg.lr
+        mpc_controller.set_nl_cons(
+            'dist_static',
+            -self.mpc_model.aux['dist_static'],
+            ub=-sp_l,
+            soft_constraint=True
+        )
+        if self.dynamic_obs_check:
+            mpc_controller.set_nl_cons(
+                'dist_dynamic',
+                -self.mpc_model.aux['dist_dynamic'],
+                ub=-sp_l
+            )
+
         # setup
         mpc_controller.setup()
         return mpc_controller
+
+    def update_dynamic_obs_coords(self, sim_obs):
+        coords = None
+        for player in sim_obs.players:
+            # Update all other players
+            if player != self.name:
+                # Get obstacle state
+                obs_state = sim_obs.players[player].state
+                # Extract x, y values
+                x, y = obs_state.x, obs_state.y
+                _coords = np.array([x, y])
+                if coords is None:
+                    coords = _coords
+                else:
+                    coords = np.concatenate((coords, _coords))
+        if coords.ndim > 1:
+            self.x_dynamic_obs = cas.SX(coords[:, 0])
+            self.y_dynamic_obs = cas.SX(coords[:, 1])
+        else:
+            self.x_dynamic_obs = cas.SX(coords[0])
+            self.y_dynamic_obs = cas.SX(coords[1])
+
+    def get_static_obs_coords(self):
+        coords = None
+        for obs in self.static_obstacles:
+            if isinstance(obs.shape, LinearRing):
+                _coords = np.array(obs.shape.coords)
+            else:
+                _coords = np.array(obs.shape.exterior.coords)
+            if coords is None:
+                coords = _coords
+            else:
+                coords = np.concatenate((coords, _coords))
+        x = cas.SX(coords[:, 0])
+        y = cas.SX(coords[:, 1])
+        return x, y
 
     def decide_target_point(self, my_current_state):
         x = my_current_state.x
         y = my_current_state.y
 
-        dist_table = [math.hypot(node.x - x, node.y - y) if node.passed==False and math.hypot(node.x - x, node.y - y) > self.radius
-                                                         else np.inf for node in self.path_nodes]
+        dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
 
-        if index == len(dist_table)-2:
-            target_node = self.path_nodes[index+1]
+        LOOK_AHEAD = 7
+
+        if index + LOOK_AHEAD < len(self.path_nodes):
+            index += LOOK_AHEAD
         else:
-            for node in self.path_nodes[:index+1]:
-                node.passed = True
-            target_node = self.path_nodes[index]
+            index = len(self.path_nodes)-1 # so index + 1 is not out of bound
+
+        target_node:Node = self.path_nodes[index]
 
         return target_node.x, target_node.y, target_node.psi, index
