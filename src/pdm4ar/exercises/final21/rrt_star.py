@@ -22,7 +22,7 @@ class RrtStar:
                  goal:PolygonGoal,
                  static_obstacles: Sequence[Polygon], # List of static obstacles which are Polygons
                  max_size: int=100,
-                 iter_max: int=10000,
+                 iter_max: int=100,
                  eta: int=0.3,
                  gamma_rrg: int=20):   
         self.start = Node(Point(start.x, start.y)) # CoG of Spacecraft is start point
