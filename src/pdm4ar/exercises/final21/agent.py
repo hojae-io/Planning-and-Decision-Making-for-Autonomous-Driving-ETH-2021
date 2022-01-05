@@ -181,12 +181,12 @@ class Pdm4arAgent(Agent):
         dist_static = mpc_model.set_expression(
             'dist_static',
             cas.mmin(cas.sqrt((self.x_static_obs-x)**2+(self.y_static_obs-y)**2))
-        )
+        )  # Distance to static obstacles
         if self.dynamic_obs_present:
             dist_dynamic = mpc_model.set_expression(
                 'dist_dynamic',
                 cas.mmin(cas.sqrt((self.x_dynamic_obs-x)**2+(self.y_dynamic_obs-y)**2))
-            )
+            )  # Distance to dynamic obstacles
         # Build model
         mpc_model.setup()
         return mpc_model
@@ -204,7 +204,7 @@ class Pdm4arAgent(Agent):
         }
         mpc_controller.set_param(**setup_mpc)
         # Objective
-        LAMBDA_1 = 10
+        LAMBDA_1 = 8
         LAMBDA_2 = 6
         dist = (self.x_ref-self.mpc_model.x['x'])**2 + (self.y_ref-self.mpc_model.x['y'])**2
         angle = (self.psi_ref - self.mpc_model.x['psi'])**2
@@ -212,31 +212,27 @@ class Pdm4arAgent(Agent):
         mpc_controller.set_objective(mterm=cost, lterm=cost)
         mpc_controller.set_rterm(u_r=1, u_l=1)
         # Constraints
+        # Accelerations
         mpc_controller.bounds['lower', '_u', 'u_l'] = -10.0
         mpc_controller.bounds['upper', '_u', 'u_l'] = 10.0
         mpc_controller.bounds['lower', '_u', 'u_r'] = -10.0
         mpc_controller.bounds['upper', '_u', 'u_r'] = 10.0
-
+        # Distances to obstacles
         sp_l = self.sg.lf + self.sg.lr
         mpc_controller.set_nl_cons(
             'dist_static',
             -self.mpc_model.aux['dist_static'],
-            ub=-sp_l,
-            soft_constraint=True
+            ub=-sp_l
         )
         if self.dynamic_obs_present:
             mpc_controller.set_nl_cons(
                 'dist_dynamic',
                 -self.mpc_model.aux['dist_dynamic'],
-                ub=-sp_l
+                ub=-1.5*sp_l  # Further from dynamic obstacles
             )
-        # mpc_controller.bounds['lower', '_x', 'vx'] = -50
-        # mpc_controller.bounds['upper', '_x', 'vx'] = 50
-        # mpc_controller.bounds['lower', '_x', 'vy'] = -50
-        # mpc_controller.bounds['upper', '_x', 'vy'] = 50
-        mpc_controller.bounds['lower', '_x', 'dpsi'] = -.5*np.pi
-        mpc_controller.bounds['upper', '_x', 'dpsi'] = .5*np.pi
-        # setup
+        mpc_controller.bounds['lower', '_x', 'dpsi'] = -.2*np.pi
+        mpc_controller.bounds['upper', '_x', 'dpsi'] = .2*np.pi
+        # Setup
         mpc_controller.setup()
         return mpc_controller
     
@@ -264,20 +260,21 @@ class Pdm4arAgent(Agent):
         y = my_current_state.y
         dist_table = [math.hypot(node.x - x, node.y - y) for node in self.path_nodes]
         index = int(np.argmin(dist_table))
-        LOOK_AHEAD = 12
+        LOOK_AHEAD = 6
         if index + LOOK_AHEAD < len(self.path_nodes):
             index += LOOK_AHEAD
         else:
-            index = len(self.path_nodes)-2 # so index + 1 is not out of bound
+            index = len(self.path_nodes) - 1
 
         target_node = self.path_nodes[index]
         # Calculate path's angle at the target node
-        if index != len(self.path_nodes)-1:
-            next_node = self.path_nodes[index+1]
-        else:
-            next_node = target_node
-        dx = next_node.x - target_node.x
-        dy = next_node.y - target_node.y
+        next_index = len(self.path_nodes) - 1 \
+            if index + 3 > len(self.path_nodes) - 1 \
+                else index + 3
+        next_node = self.path_nodes[next_index]
+        previous_node = self.path_nodes[index - 3]
+        dx = next_node.x - previous_node.x
+        dy = next_node.y - previous_node.y
         # Update reference point
         self.x_ref = target_node.x
         self.y_ref = target_node.y

@@ -7,7 +7,8 @@ from reprep import Report, MIME_GIF
 
 from pdm4ar.exercises_def import Exercise, ExIn
 from pdm4ar.exercises_def.final21.performance import evaluate_episode
-from pdm4ar.exercises_def.final21.sim_context import get_sim_context_static, get_sim_context_dynamic
+from pdm4ar.exercises_def.final21.sim_context import \
+    get_sim_context_static, get_sim_context_dynamic, get_sim_context_dynamic_multiple
 
 
 @dataclass
@@ -51,8 +52,9 @@ def algo_placeholder(ex_in):
 def get_final21() -> Exercise:
     seed = 0
     test_values = [
-        # TestValueExFinal21(get_sim_context_static(seed)),
+        TestValueExFinal21(get_sim_context_static(seed)),
         TestValueExFinal21(get_sim_context_dynamic(seed)),
+        TestValueExFinal21(get_sim_context_dynamic_multiple(seed))
     ]
 
     return Exercise[TestValueExFinal21, Any](

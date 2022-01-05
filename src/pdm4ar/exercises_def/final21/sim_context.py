@@ -18,7 +18,11 @@ from shapely.geometry import Polygon
 from pdm4ar.exercises.final21.agent import Pdm4arAgent
 from pdm4ar.exercises_def.final21.scenario import get_dgscenario
 
-__all__ = ["get_sim_context_static", "get_sim_context_dynamic"]
+__all__ = [
+    "get_sim_context_static", 
+    "get_sim_context_dynamic",
+    "get_sim_context_dynamic_multiple"
+]
 
 PDM4AR = PlayerName("PDM4AR")
 
@@ -68,6 +72,47 @@ def get_sim_context_dynamic(seed: Optional[int] = None) -> SimContext:
         values=[DynObstacleCommands(acc_x=0, acc_y=0, acc_psi=0)],
     )
     players = {DObs1: NPAgent(dyn_obstacle_commands)}
+    simcontext.models.update(models)
+    simcontext.players.update(players)
+
+    return simcontext
+
+
+def get_sim_context_dynamic_multiple(seed: Optional[int] = None) -> SimContext:
+    dgscenario, goal, x0 = get_dgscenario(seed)
+    simcontext = _get_sim_context_static(dgscenario, goal, x0)
+    simcontext.description = "dynamic-environment-multiple"
+    # add a couple of dynamic obstacles to the environment
+    DObs1 = PlayerName("DObs1")
+    poly = Polygon(create_random_starshaped_polygon(0, 0, 3, 0.2, 0.2, 6))
+    x0_dobs1: DynObstacleState = DynObstacleState(x=60, y=80, psi=deg2rad(-70), vx=6, vy=0, dpsi=0)
+    og_dobs1: ObstacleGeometry = ObstacleGeometry(m=1000, Iz=1000, e=0.2)
+    op_dops1: DynObstacleParameters = DynObstacleParameters(vx_limits=(-10, 10), acc_limits=(-1, 1))
+
+    DObs2 = PlayerName("DObs2")
+    x0_dobs2: DynObstacleState = DynObstacleState(x=80, y=60, psi=deg2rad(-70), vx=-2, vy=0, dpsi=0)
+    og_dobs2: ObstacleGeometry = ObstacleGeometry(m=1000, Iz=1000, e=0.2)
+    op_dops2: DynObstacleParameters = DynObstacleParameters(vx_limits=(-10, 10), acc_limits=(-1, 1))
+
+    DObs3 = PlayerName("DObs3")
+    x0_dobs3: DynObstacleState = DynObstacleState(x=30, y=30, psi=deg2rad(-100), vx=1, vy=1, dpsi=0)
+    og_dobs3: ObstacleGeometry = ObstacleGeometry(m=1000, Iz=1000, e=0.2)
+    op_dops3: DynObstacleParameters = DynObstacleParameters(vx_limits=(-10, 10), acc_limits=(-1, 1))
+
+    models = {
+        DObs1: DynObstacleModel(x0_dobs1, poly, og_dobs1, op_dops1),
+        DObs2: DynObstacleModel(x0_dobs2, poly, og_dobs2, op_dops2),
+        DObs3: DynObstacleModel(x0_dobs3, poly, og_dobs3, op_dops3)
+    }
+    dyn_obstacle_commands = DgSampledSequence[DynObstacleCommands](
+        timestamps=[0],
+        values=[DynObstacleCommands(acc_x=0, acc_y=0, acc_psi=0)],
+    )
+    players = {
+        DObs1: NPAgent(dyn_obstacle_commands),
+        DObs2: NPAgent(dyn_obstacle_commands),
+        DObs3: NPAgent(dyn_obstacle_commands)
+    }
     simcontext.models.update(models)
     simcontext.players.update(players)
 

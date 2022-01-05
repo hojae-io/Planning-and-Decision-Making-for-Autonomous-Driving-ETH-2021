@@ -6,7 +6,7 @@ matplotlib>=3.4.0
 numpy>=1.21.0
 osmnx>=1.1.1
 
-dg-commons==0.0.16
+dg-commons==0.0.18
 reprep-z6>=6.0.3,<7
 tqdm
 
